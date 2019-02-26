@@ -170,8 +170,6 @@ EXAMPLES = '''
 
 '''
 
-import time
-
 try:
     import boto
     HAS_BOTO = True
@@ -185,6 +183,7 @@ try:
 except ImportError:
     HAS_BOTO3 = False
 
+from time import sleep
 
 def check_for_rep_group(module, connection):
 
@@ -245,15 +244,25 @@ def create_rep_group(module, connection):
 
     if wait:
         waiter = connection.get_waiter('replication_group_available')
-        waiter.wait(ReplicationGroupId=params['ReplicationGroupId'])
-        rep_group = connection.describe_replication_groups({'ReplicationGroupId': params['ReplicationGroupId']})
+        waiter.wait(ReplicationGroupId=params['ReplicationGroupId'], WaiterConfig={
+            'Delay': 60,
+            'MaxAttempts': 15
+        })
+        rep_group = connection.describe_replication_groups(**{'ReplicationGroupId': params['ReplicationGroupId']})
         module.exit_json(changed=True, **rep_group['ReplicationGroups'][0])
     else:
         module.exit_json(changed=True, **response)
 
 
 def destroy_rep_group(module, connection):
-
+    
+    wait = module.params.get('wait')
+    changed = False
+    rep_group = True
+    wait_timeout = 900
+    sleep_interval = 10
+    elapsed_time = 0
+    
     params = dict()
 
     params['ReplicationGroupId'] = module.params.get('id')
@@ -266,11 +275,24 @@ def destroy_rep_group(module, connection):
             del params[k]
 
     try:
-        result = connection.delete_replication_groups(**params)
+        result = connection.delete_replication_group(**params)
+        changed = True
     except botocore.exceptions.ClientError as e:
+        if e.response['ReplicationGroup']['Status'] == 'deleting':
+            pass
         module.fail_json(msg=e.message)
 
-    print result
+    if wait:
+        while wait_timeout > elapsed_time and rep_group:
+            rep_group = check_for_rep_group(module, connection)
+            sleep(sleep_interval)
+            elapsed_time += sleep_interval
+        if elapsed_time >= wait_timeout:
+            module.fail_json(msg="Timed out waiting for replication group to be deleted.")
+    else:
+      pass
+    
+    module.exit_json(changed=changed, **result)
 
 
 def modify_rep_group(module, connection, rep_group):
@@ -404,7 +426,7 @@ def main():
         if rep_group is False:
             create_rep_group(module, connection)
         else:
-            modify_rep_group(module, connection, rep_group)
+            module.exit_json(changed=False, **rep_group['ReplicationGroups'][0])
     elif state == "absent":
         rep_group = check_for_rep_group(module, connection)
         if rep_group is False:
